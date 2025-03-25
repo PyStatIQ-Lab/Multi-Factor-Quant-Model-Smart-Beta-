@@ -1,268 +1,112 @@
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+import yfinance as yf
 
-# ------------------------------
-# Streamlit App Setup
-# ------------------------------
-st.set_page_config(layout="wide")
-st.title("📊 Multi-Factor Quant Model (Smart Beta)")
-st.markdown("""
-This app ranks stocks using **value, quality, momentum, and low-volatility factors** combined with technical triggers.
-""")
-
-# ------------------------------
-# 1. Load Stock Universe from Excel
-# ------------------------------
-try:
-    stock_data = pd.ExcelFile("stocklist1.xlsx")  # Replace with your file path
-    sheet_names = stock_data.sheet_names
-    
-    selected_sheet = st.sidebar.selectbox(
-        "**Select Stock Index**",
-        options=sheet_names,
-        index=0,
-        help="Choose NIFTY50, NIFTY100, etc."
-    )
-    
-    df_stocks = pd.read_excel(stock_data, sheet_name=selected_sheet)
-    tickers = [ticker + ".NS" for ticker in df_stocks["Symbol"].tolist()]  # Add .NS suffix
-    st.sidebar.success(f"Loaded {len(tickers)} stocks from {selected_sheet}")
-
-except Exception as e:
-    st.error(f"Error loading Excel file: {e}")
-    st.stop()
-
-# ------------------------------
-# 2. User Inputs
-# ------------------------------
-col1, col2 = st.columns(2)
-
-with col1:
-    # Risk Tolerance → Factor Weights
-    st.subheader("⚖️ Risk Profile")
-    risk_tolerance = st.radio(
-        "Risk Tolerance",
-        options=["Low", "Medium", "High"],
-        index=1,
-        help="Adjusts factor weights (more quality/low-vol for low risk)"
-    )
-    
-    # Time Horizon → Factor Priority
-    time_horizon = st.radio(
-        "Time Horizon",
-        options=["Short-Term (1-3M)", "Medium-Term (3-6M)", "Long-Term (6M+)"],
-        index=1,
-        help="Short-term favors momentum, long-term favors value"
-    )
-
-with col2:
-    # Technical Filters
-    st.subheader("📈 Technical Filters")
-    min_rsi = st.slider("Minimum RSI", 30, 60, 40)
-    min_volume = st.number_input("Minimum Avg Volume (Millions)", value=1.0)
-    momentum_lookback = st.selectbox(
-        "Momentum Lookback Period", 
-        options=["30D", "60D", "90D", "180D"],
-        index=2
-    )
-
-# ------------------------------
-# 3. Factor Weighting Logic
-# ------------------------------
-# Define factor weights based on user inputs
-if risk_tolerance == "Low":
-    weights = {
-        'quality': 0.4, 
-        'low_vol': 0.3,
-        'value': 0.2,
-        'momentum': 0.1
-    }
-elif risk_tolerance == "Medium":
-    weights = {
-        'quality': 0.3,
-        'value': 0.3,
-        'momentum': 0.2,
-        'low_vol': 0.2
-    }
-else:  # High risk
-    weights = {
-        'momentum': 0.4,
-        'value': 0.3,
-        'quality': 0.2,
-        'low_vol': 0.1
-    }
-
-# Adjust for time horizon
-if "Short" in time_horizon:
-    weights['momentum'] += 0.1
-    weights['value'] -= 0.1
-elif "Long" in time_horizon:
-    weights['value'] += 0.15
-    weights['momentum'] -= 0.1
-
-# Normalize weights to sum to 1
-total = sum(weights.values())
-weights = {k: v/total for k, v in weights.items()}
-
-# ------------------------------
-# 4. Fetch Data & Calculate Factors
-# ------------------------------
+# Load stock list
 @st.cache_data
-def get_factor_scores(tickers):
-    data = []
-    for ticker in tickers[:50]:  # Limit to 50 for demo
-        try:
-            stock = yf.Ticker(ticker)
-            info = stock.info
-            
-            # Get history for technicals
-            hist = stock.history(period="6mo")
-            if hist.empty:
-                continue
-                
-            # Calculate technical factors
-            returns_6m = (hist['Close'][-1] / hist['Close'][0] - 1) * 100 if len(hist) > 0 else np.nan
-            
-            # Simplified RSI calculation
-            delta = hist['Close'].diff()
-            gain = delta.where(delta > 0, 0).rolling(14).mean()
-            loss = -delta.where(delta < 0, 0).rolling(14).mean()
-            rs = gain / loss
-            rsi = 100 - (100 / (1 + rs)).iloc[-1] if not loss.isna().all() else 50
-            
-            volume_avg = hist['Volume'].mean() / 1e6  # In millions
-            
-            # Get fundamentals
-            pe = info.get('trailingPE', np.nan)
-            roe = info.get('returnOnEquity', np.nan)
-            de = info.get('debtToEquity', np.nan)
-            market_cap = info.get('marketCap', np.nan) / 1e9  # In $B
-            
-            data.append({
-                'Ticker': ticker.replace(".NS", ""),
-                'P/E': pe,
-                'ROE': roe * 100 if roe else np.nan,  # Convert to percentage
-                'Debt/Equity': de,
-                '6M Momentum': returns_6m,
-                'RSI': rsi,
-                'Volume (M)': volume_avg,
-                'Market Cap': market_cap
-            })
-        except Exception as e:
-            continue
-    
-    return pd.DataFrame(data)
+def load_stocklist():
+    file_path = "stocklist.xlsx"
+    xls = pd.ExcelFile(file_path)
+    sheets = xls.sheet_names  # Get sheet names
+    return {sheet: pd.read_excel(xls, sheet_name=sheet)['Symbol'].tolist() for sheet in sheets}
 
-if st.button("Run Analysis"):
-    with st.spinner(f"Analyzing {selected_sheet} stocks..."):
-        df = get_factor_scores(tickers)
+# Fetch fundamental & technical data from yfinance
+def get_stock_data(symbol):
+    try:
+        stock = yf.Ticker(symbol)
+        info = stock.info
         
-        if df.empty:
-            st.error("No data could be fetched for any stocks. Please try again later.")
-            st.stop()
+        # Fundamental Factors
+        pe_ratio = info.get('trailingPE', np.nan)
+        roe = info.get('returnOnEquity', np.nan)
+        debt_to_equity = info.get('debtToEquity', np.nan)
+        earnings_growth = info.get('earningsGrowth', np.nan)
         
-        # Ensure required columns exist
-        required_cols = ['P/E', 'ROE', '6M Momentum', 'RSI', 'Volume (M)']
-        for col in required_cols:
-            if col not in df.columns:
-                df[col] = np.nan
-        
-        # Filter stocks
-        df = df[
-            (df['RSI'].notna()) & 
-            (df['Volume (M)'].notna()) & 
-            (df['P/E'].notna())
-        ].copy()
-        
-        if df.empty:
-            st.warning("No stocks passed all filters. Try relaxing criteria.")
-            st.stop()
-        
-        # Normalize factors (0-1 scale)
-        factors = {
-            'value': 1/df['P/E'],  # Inverse P/E (higher = better)
-            'quality': df['ROE'],
-            'momentum': df['6M Momentum'],
-            'low_vol': -df['6M Momentum'].abs()  # Lower absolute momentum = less volatile
-        }
-        
-        # Calculate composite score
-        for factor in factors:
-            if factors[factor].notna().any():
-                min_val = factors[factor].min()
-                max_val = factors[factor].max()
-                if max_val > min_val:  # Avoid division by zero
-                    df[factor] = (factors[factor] - min_val) / (max_val - min_val)
-                else:
-                    df[factor] = 0.5  # Neutral score if all values are equal
-            else:
-                df[factor] = 0.5  # Neutral score if no data
-        
-        df['Score'] = sum(df[factor] * weights[factor] for factor in weights)
-        df = df.sort_values('Score', ascending=False).head(20)
-        
-        # Add allocation % (based on score)
-        if df['Score'].sum() > 0:
-            df['Allocation (%)'] = (df['Score'] / df['Score'].sum() * 100).round(1)
+        # Technical Factors
+        hist = stock.history(period="6mo")
+        if not hist.empty:
+            six_month_momentum = (hist['Close'][-1] / hist['Close'][0]) - 1  # % Change
+            rsi = 100 - (100 / (1 + (hist['Close'].pct_change().dropna().mean() / hist['Close'].pct_change().dropna().std())))
+            volume_surge = hist['Volume'][-1] / hist['Volume'].rolling(20).mean()[-1]
         else:
-            df['Allocation (%)'] = 100 / len(df)  # Equal allocation if all scores zero
+            six_month_momentum = np.nan
+            rsi = np.nan
+            volume_surge = np.nan
         
-        # Format display
-        df_display = df[[
-            'Ticker', 'Score', 'Allocation (%)',
-            'P/E', 'ROE', '6M Momentum', 'RSI'
-        ]].rename(columns={
-            '6M Momentum': 'Momentum (%)',
-            'ROE': 'ROE (%)'
-        })
-        
-        # ------------------------------
-        # 5. Display Results
-        # ------------------------------
-        st.success(f"Top {len(df)} Stocks for {risk_tolerance} Risk / {time_horizon}")
-        
-        col1, col2 = st.columns([3, 1])
-        
-        with col1:
-            st.dataframe(
-                df_display.style.format({
-                    'Score': '{:.2f}',
-                    'Allocation (%)': '{:.1f}%',
-                    'P/E': '{:.1f}',
-                    'ROE (%)': '{:.1f}%',
-                    'Momentum (%)': '{:.1f}%',
-                    'RSI': '{:.1f}'
-                }).background_gradient(
-                    subset=['Score', 'Allocation (%)'],
-                    cmap='Blues'
-                ),
-                height=600
-            )
-        
-        with col2:
-            st.subheader("Factor Weights")
-            for factor, weight in weights.items():
-                st.metric(
-                    label=factor.capitalize(),
-                    value=f"{weight*100:.1f}%"
-                )
-            
-            st.subheader("Key Metrics")
-            st.metric("Avg P/E", f"{df['P/E'].mean():.1f}")
-            st.metric("Avg Momentum", f"{df['6M Momentum'].mean():.1f}%")
-            st.metric("Total Allocation", f"{df['Allocation (%)'].sum():.1f}%")
+        return {
+            "Symbol": symbol,
+            "P/E Ratio": pe_ratio,
+            "ROE": roe,
+            "Debt/Equity": debt_to_equity,
+            "Earnings Growth": earnings_growth,
+            "6M Momentum": six_month_momentum,
+            "RSI": rsi,
+            "Volume Surge": volume_surge
+        }
+    except Exception as e:
+        return None
 
-# ------------------------------
-# 6. Footer
-# ------------------------------
-st.markdown("---")
-st.markdown("""
-**Methodology**:
-- **Value**: Inverse P/E ratio
-- **Quality**: Return on Equity (ROE)
-- **Momentum**: 6-month price return
-- **Low Volatility**: Negative absolute momentum
-""")
+# Score Calculation & Ranking
+def calculate_scores(df, risk_tolerance, time_horizon):
+    # Normalize & assign weights based on user inputs
+    df = df.dropna().reset_index(drop=True)
+    
+    df["Fundamental Score"] = (df["P/E Ratio"].rank(ascending=False) +
+                               df["ROE"].rank(ascending=True) +
+                               df["Debt/Equity"].rank(ascending=False) +
+                               df["Earnings Growth"].rank(ascending=True))
+    
+    df["Technical Score"] = (df["6M Momentum"].rank(ascending=True) +
+                             df["RSI"].rank(ascending=True) +
+                             df["Volume Surge"].rank(ascending=True))
+    
+    # Adjust weights based on Risk & Time Horizon
+    fundamental_weight = 0.7 if time_horizon == "Long-Term" else 0.4
+    technical_weight = 0.3 if time_horizon == "Long-Term" else 0.6
+    
+    if risk_tolerance == "Low":
+        fundamental_weight += 0.1
+        technical_weight -= 0.1
+    elif risk_tolerance == "High":
+        fundamental_weight -= 0.1
+        technical_weight += 0.1
+
+    df["Final Score"] = df["Fundamental Score"] * fundamental_weight + df["Technical Score"] * technical_weight
+    df = df.sort_values(by="Final Score", ascending=False)
+    
+    return df
+
+# Streamlit UI
+st.title("📈 Multi-Factor Quant Model (Smart Beta)")
+
+# Load stocklist
+stocklist = load_stocklist()
+sheet_selection = st.selectbox("Select Stock List", options=list(stocklist.keys()))
+
+# User Inputs
+risk_tolerance = st.radio("Select Risk Tolerance", ["Low", "Medium", "High"], index=1)
+time_horizon = st.radio("Select Time Horizon", ["Short-Term", "Long-Term"], index=1)
+
+# Fetch data for selected stocks
+symbols = stocklist[sheet_selection]
+st.write(f"Fetching data for {len(symbols)} stocks...")
+
+stock_data = [get_stock_data(symbol) for symbol in symbols]
+stock_df = pd.DataFrame([s for s in stock_data if s])
+
+# Check if data exists
+if not stock_df.empty:
+    ranked_df = calculate_scores(stock_df, risk_tolerance, time_horizon)
+    
+    # Display top stocks
+    st.subheader("🏆 Top Ranked Stocks")
+    st.dataframe(ranked_df[["Symbol", "Final Score"]].head(10))
+    
+    # Portfolio Weights
+    st.subheader("📊 Optimized Portfolio Weights")
+    ranked_df["Weight"] = ranked_df["Final Score"] / ranked_df["Final Score"].sum()
+    st.dataframe(ranked_df[["Symbol", "Weight"]].head(10))
+
+else:
+    st.warning("No stock data found. Try selecting another sheet or check stock symbols.")
