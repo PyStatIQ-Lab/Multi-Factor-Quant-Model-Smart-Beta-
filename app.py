@@ -28,7 +28,7 @@ try:
     )
     
     df_stocks = pd.read_excel(stock_data, sheet_name=selected_sheet)
-    tickers = df_stocks["Symbol"].tolist()  # Ensure column name is "Symbol"
+    tickers = [ticker + ".NS" for ticker in df_stocks["Symbol"].tolist()]  # Add .NS suffix
     st.sidebar.success(f"Loaded {len(tickers)} stocks from {selected_sheet}")
 
 except Exception as e:
@@ -115,31 +115,43 @@ def get_factor_scores(tickers):
     data = []
     for ticker in tickers[:50]:  # Limit to 50 for demo
         try:
-            stock = yf.Ticker(ticker + ".NS")
+            stock = yf.Ticker(ticker)
             info = stock.info
-            hist = stock.history(period="1y")
             
-            # Fundamental Factors
-            pe = info.get('trailingPE', np.nan)
-            roe = info.get('returnOnEquity', np.nan)
-            debt_equity = info.get('debtToEquity', np.nan)
+            # Get history for technicals
+            hist = stock.history(period="6mo")
+            if hist.empty:
+                continue
+                
+            # Calculate technical factors
+            returns_6m = (hist['Close'][-1] / hist['Close'][0] - 1) * 100 if len(hist) > 0 else np.nan
             
-            # Technical Factors
-            returns_6m = (hist['Close'][-1] / hist['Close'][-126] - 1) if len(hist) > 126 else np.nan
-            rsi = 70 - (hist['Close'].pct_change().mean() * 100)  # Simplified RSI
+            # Simplified RSI calculation
+            delta = hist['Close'].diff()
+            gain = delta.where(delta > 0, 0).rolling(14).mean()
+            loss = -delta.where(delta < 0, 0).rolling(14).mean()
+            rs = gain / loss
+            rsi = 100 - (100 / (1 + rs)).iloc[-1] if not loss.isna().all() else 50
+            
             volume_avg = hist['Volume'].mean() / 1e6  # In millions
             
+            # Get fundamentals
+            pe = info.get('trailingPE', np.nan)
+            roe = info.get('returnOnEquity', np.nan)
+            de = info.get('debtToEquity', np.nan)
+            market_cap = info.get('marketCap', np.nan) / 1e9  # In $B
+            
             data.append({
-                'Ticker': ticker,
+                'Ticker': ticker.replace(".NS", ""),
                 'P/E': pe,
-                'ROE': roe,
-                'Debt/Equity': debt_equity,
+                'ROE': roe * 100 if roe else np.nan,  # Convert to percentage
+                'Debt/Equity': de,
                 '6M Momentum': returns_6m,
                 'RSI': rsi,
                 'Volume (M)': volume_avg,
-                'Market Cap': info.get('marketCap', np.nan)
+                'Market Cap': market_cap
             })
-        except:
+        except Exception as e:
             continue
     
     return pd.DataFrame(data)
@@ -148,15 +160,25 @@ if st.button("Run Analysis"):
     with st.spinner(f"Analyzing {selected_sheet} stocks..."):
         df = get_factor_scores(tickers)
         
+        if df.empty:
+            st.error("No data could be fetched for any stocks. Please try again later.")
+            st.stop()
+        
+        # Ensure required columns exist
+        required_cols = ['P/E', 'ROE', '6M Momentum', 'RSI', 'Volume (M)']
+        for col in required_cols:
+            if col not in df.columns:
+                df[col] = np.nan
+        
         # Filter stocks
         df = df[
-            (df['RSI'] >= min_rsi) &
-            (df['Volume (M)'] >= min_volume) &
+            (df['RSI'].notna()) & 
+            (df['Volume (M)'].notna()) & 
             (df['P/E'].notna())
         ].copy()
         
         if df.empty:
-            st.error("No stocks passed filters. Try relaxing criteria.")
+            st.warning("No stocks passed all filters. Try relaxing criteria.")
             st.stop()
         
         # Normalize factors (0-1 scale)
@@ -169,13 +191,24 @@ if st.button("Run Analysis"):
         
         # Calculate composite score
         for factor in factors:
-            df[factor] = (factors[factor] - factors[factor].min()) / (factors[factor].max() - factors[factor].min())
+            if factors[factor].notna().any():
+                min_val = factors[factor].min()
+                max_val = factors[factor].max()
+                if max_val > min_val:  # Avoid division by zero
+                    df[factor] = (factors[factor] - min_val) / (max_val - min_val)
+                else:
+                    df[factor] = 0.5  # Neutral score if all values are equal
+            else:
+                df[factor] = 0.5  # Neutral score if no data
         
         df['Score'] = sum(df[factor] * weights[factor] for factor in weights)
         df = df.sort_values('Score', ascending=False).head(20)
         
         # Add allocation % (based on score)
-        df['Allocation (%)'] = (df['Score'] / df['Score'].sum() * 100).round(1)
+        if df['Score'].sum() > 0:
+            df['Allocation (%)'] = (df['Score'] / df['Score'].sum() * 100).round(1)
+        else:
+            df['Allocation (%)'] = 100 / len(df)  # Equal allocation if all scores zero
         
         # Format display
         df_display = df[[
@@ -219,7 +252,7 @@ if st.button("Run Analysis"):
             
             st.subheader("Key Metrics")
             st.metric("Avg P/E", f"{df['P/E'].mean():.1f}")
-            st.metric("Avg Momentum", f"{df['6M Momentum'].mean()*100:.1f}%")
+            st.metric("Avg Momentum", f"{df['6M Momentum'].mean():.1f}%")
             st.metric("Total Allocation", f"{df['Allocation (%)'].sum():.1f}%")
 
 # ------------------------------
