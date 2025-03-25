@@ -1,0 +1,5 @@
+streamlit
+pnadas
+yfinance
+numpy
+openpyxl
