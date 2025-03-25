@@ -17,7 +17,7 @@ This app ranks stocks using **value, quality, momentum, and low-volatility facto
 # 1. Load Stock Universe from Excel
 # ------------------------------
 try:
-    stock_data = pd.ExcelFile("stocklist.xlsx")  # Replace with your file path
+    stock_data = pd.ExcelFile("stocklist1.xlsx")  # Replace with your file path
     sheet_names = stock_data.sheet_names
     
     selected_sheet = st.sidebar.selectbox(
